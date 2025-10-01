@@ -2,9 +2,17 @@
 
 pragma solidity ^0.8.19;
 
+import "./interfaces/IERC20.sol";
+
 import "./lib/Tick.sol";
+import "./lib/Position.sol";
+import "./lib/SafeCast.sol";
+
+
 
 contract CLAMM {
+    using SafeCast for int256;
+
     // Tokens which will be under consideration in this pool
     address public immutable token0;
     address public immutable token1;
@@ -15,6 +23,80 @@ contract CLAMM {
 
     uint128 public immutable maxLiquidityPerTick;
 
+    struct Slot0 {
+        /*
+            X = token0
+            Y = token1
+            P = Price of X in terms of Y ,i.e., Y = Y / X;
+
+            Q96 = 2^96;
+            sqrtPriceX96 = sqrt(P) * Q96;
+            
+            P = (sqrtPriceX96 / Q96)^2 = 1.0001 ^ tick
+            tick = ( 2 * log(P)) / log(1.0001)
+            sqrtPriceX96 is mostly a CONSTANT defined in all the Chains, i.e., in Arbitrum it is 3443439269043970780644209.
+
+            after we get P, we need to multiply and divide it with the decimals of token0 and token1.
+            eg: if token0 = ETH, decimals_0 = 1e18 and token2 = USDC, decimals_1 = 1e6
+        */
+        uint160 sqrtPriceX96;
+
+        /*
+            A tick represents a discrete price level in a Uniswap V3 pool. 
+            Prices are encoded as the square‑root of the token‑to‑token ratio (sqrtPriceX96). 
+            Each tick corresponds to a fixed multiplicative change in that price:
+
+            price at tick t=(1.0001) ^ t
+ 
+            Because the price is stored as a square‑root, the tick step is chosen so that moving one tick changes the price by exactly 0.01% (1.0001). 
+            This granularity lets liquidity providers (LPs) concentrate their capital within very narrow price ranges.
+        */
+        int24 tick;
+
+        // whether the pool is locked - used for reentrancy protection
+        bool unlocked;
+
+        /*
+        /// Related to price Oracle - NOT UNDER CONSIDERATION FOR NOW
+
+        // the most-recently updated index of the observations array
+        uint16 observationIndex;
+        // the current maximum number of observations that are being stored
+        uint16 observationCardinality;
+        // the next maximum number of observations to store, triggered in observations.write
+        uint16 observationCardinalityNext;
+        */
+
+        // the current protocol fee as a percentage of the swap fee taken on withdrawal
+        // represented as an integer denominator (1/x)%
+        // uint8 feeProtocol;
+    }
+
+    Slot0 public slot0;
+    mapping(bytes32 => Position.Info) public positions;
+
+    struct ModifyPositionParams {
+        address owner;
+        int24 tickLower;
+        int24 tickUpper;
+        int128 liquidityDelta;
+    }
+
+    function _modifyPosition(ModifyPositionParams memory params) private returns (Position.Info storage position, int256 amount0, int256 amount1) {
+        return (positions[bytes32(0)], 0, 0);
+    }
+
+
+    /// @dev Mutually exclusive reentrancy protection into the pool to/from a method. This method also prevents entrance
+    /// to a function before the pool is initialized. The reentrancy guard is required throughout the contract because
+    /// we use balance checks to determine the payment status of interactions such as mint, swap and flash.
+    modifier lock() {
+        require(slot0.unlocked, "locked");
+        slot0.unlocked = false;
+        _;
+        slot0.unlocked = true;
+    }
+
     constructor(address _token0, address _token1, uint24 _fee, int24 _tickSpacing) {
         token0 = _token0;
         token1 = _token1;
@@ -24,5 +106,44 @@ contract CLAMM {
         maxLiquidityPerTick = Tick.tickSpacingToMaxLiquidityPerTick(_tickSpacing);
     }
 
+    function initialize(uint160 sqrtPriceX96) external {
+        require(slot0.sqrtPriceX96 == 0, "Already initialized");
 
+        int24 tick = TickMath.getTickAtSqrtRatio(sqrtPriceX96);
+
+        slot0 = Slot0({
+            sqrtPriceX96: sqrtPriceX96,
+            tick: tick,
+            unlocked: true
+        });
+    }
+
+    function mint(address recipient, int24 tickLower, int24 tickUpper, uint128 amount) external lock returns(uint256 amount0, uint256 amount1) {
+        require(amount > 0, "amount is 0");
+
+        /*
+            It calculates the amount of token0 and token1 that are required to mint the given amount of liquidity.
+            So amount0Int would require amount0Int amount of token0 and amount1Int amount of token1 to raise a liquidy worth amount.
+        */
+
+        (, int256 amount0Int, int256 amount1Int) = 
+            _modifyPosition(
+                ModifyPositionParams({
+                    owner: recipient,
+                    tickLower: tickLower,
+                    tickUpper: tickUpper,
+                    liquidityDelta: int256(uint256(amount)).toInt128()
+                })
+            );
+        
+        amount0 = uint256(amount0Int);
+        amount1 = uint256(amount1Int);
+
+        if ( amount0 > 0 ) {
+            IERC20(token0).transferFrom(msg.sender, address(this), amount0);
+        }
+        if ( amount1 > 0 ) {
+            IERC20(token1).transferFrom(msg.sender, address(this), amount1);
+        }
+    } 
 }
