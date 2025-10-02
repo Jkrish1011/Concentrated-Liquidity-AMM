@@ -7,11 +7,14 @@ import "./interfaces/IERC20.sol";
 import "./lib/Tick.sol";
 import "./lib/Position.sol";
 import "./lib/SafeCast.sol";
-
-
+import "./lib/TickMath.sol";
 
 contract CLAMM {
     using SafeCast for int256;
+    using Position for mapping(bytes32 => Position.Info);
+    using Position for Position.Info;
+    using Tick for mapping(int24 => Tick.Info);
+
 
     // Tokens which will be under consideration in this pool
     address public immutable token0;
@@ -75,6 +78,9 @@ contract CLAMM {
     Slot0 public slot0;
     mapping(bytes32 => Position.Info) public positions;
 
+    // For each tick, there is some form of information stored
+    mapping(int24 => Tick.Info) public ticks;
+
     struct ModifyPositionParams {
         address owner;
         int24 tickLower;
@@ -82,10 +88,73 @@ contract CLAMM {
         int128 liquidityDelta;
     }
 
-    function _modifyPosition(ModifyPositionParams memory params) private returns (Position.Info storage position, int256 amount0, int256 amount1) {
-        return (positions[bytes32(0)], 0, 0);
+    function checkTicks(int24 tickLower, int24 tickUpper) pure internal {
+        require(tickLower < tickUpper, "Invalid tick range");
+        require(tickLower >= TickMath.MIN_TICK, "TickLower too low");
+        require(tickUpper <= TickMath.MAX_TICK, "TickUpper too high");
+        
     }
 
+    function _updatePosition(address owner, int24 tickLower, int24 tickUpper, int128 liquidityDelta, int24 tick) private returns (Position.Info storage position) {
+        position = positions.get(owner, tickLower, tickUpper);
+
+        // TODO: Fees
+        uint256 _feeGrowthGlobal0X128 = 0;
+        uint256 _feeGrowthGlobal1X128 = 0;
+
+        bool flippedLower;
+        bool flippedUpper;
+
+        if (liquidityDelta != 0) {
+            flippedLower = ticks.update(
+                tickLower,
+                tick,
+                liquidityDelta,
+                _feeGrowthGlobal0X128,
+                _feeGrowthGlobal1X128,
+                false,
+                maxLiquidityPerTick
+            );
+
+            flippedUpper = ticks.update(
+                tickUpper, 
+                tick,
+                liquidityDelta,
+                _feeGrowthGlobal0X128,
+                _feeGrowthGlobal1X128,
+                true,
+                maxLiquidityPerTick
+            );
+        }
+
+        position.update(liquidityDelta, _feeGrowthGlobal0X128, _feeGrowthGlobal1X128);
+
+        /*
+            if liquidityDelta < 0, it means liquidity is being removed
+            if liquidity is removed and the tick is flipped, we need to clear the tick
+            because it's value is 0
+        */
+        if (liquidityDelta < 0) {
+            if (flippedLower) {
+                ticks.clear(tickLower);
+            }
+            if (flippedUpper) {
+                ticks.clear(tickUpper);
+            }
+        }
+
+        return position;
+    }
+
+    function _modifyPosition(ModifyPositionParams memory params) private returns (Position.Info storage position, int256 amount0, int256 amount1) {
+        checkTicks(params.tickLower, params.tickUpper);
+
+        Slot0 memory _slot0 = slot0;
+        
+        // params.liquidityDelta can be liquidity added or liquidity removed
+        position = _updatePosition(params.owner, params.tickLower, params.tickUpper, params.liquidityDelta, _slot0.tick);
+        return (positions[bytes32(0)], 0, 0);
+    }
 
     /// @dev Mutually exclusive reentrancy protection into the pool to/from a method. This method also prevents entrance
     /// to a function before the pool is initialized. The reentrancy guard is required throughout the contract because
