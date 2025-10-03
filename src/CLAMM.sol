@@ -8,6 +8,7 @@ import "./lib/Tick.sol";
 import "./lib/Position.sol";
 import "./lib/SafeCast.sol";
 import "./lib/TickMath.sol";
+import "./lib/SqrtPriceMath.sol";
 
 contract CLAMM {
     using SafeCast for int256;
@@ -76,6 +77,7 @@ contract CLAMM {
     }
 
     Slot0 public slot0;
+    uint128 public liquidity;
     mapping(bytes32 => Position.Info) public positions;
 
     // For each tick, there is some form of information stored
@@ -153,7 +155,41 @@ contract CLAMM {
         
         // params.liquidityDelta can be liquidity added or liquidity removed
         position = _updatePosition(params.owner, params.tickLower, params.tickUpper, params.liquidityDelta, _slot0.tick);
-        return (positions[bytes32(0)], 0, 0);
+
+        if (params.liquidityDelta != 0) {
+            if (_slot0.tick < params.tickLower) {
+                amount0 = SqrtPriceMath.getAmount0Delta(
+                    TickMath.getSqrtRatioAtTick(params.tickLower),
+                    TickMath.getSqrtRatioAtTick(params.tickUpper),
+                    params.liquidityDelta
+                );
+
+            } else if (_slot0.tick < params.tickUpper) {
+                // _slot0.tick is in the range of params.tickLower and params.tickUpper
+                 amount0 = SqrtPriceMath.getAmount0Delta(
+                    _slot0.sqrtPriceX96,
+                    TickMath.getSqrtRatioAtTick(params.tickUpper),
+                    params.liquidityDelta
+                );
+
+                amount1 = SqrtPriceMath.getAmount1Delta(
+                    TickMath.getSqrtRatioAtTick(params.tickLower),
+                    _slot0.sqrtPriceX96,
+                    params.liquidityDelta
+                );
+                liquidity = params.liquidityDelta < 0 ?
+                                liquidity - uint128(-params.liquidityDelta) :
+                                liquidity + uint128(params.liquidityDelta);
+
+            } else {
+                // _slot0.tick > params.tickUpper
+                amount1 = SqrtPriceMath.getAmount1Delta(
+                    TickMath.getSqrtRatioAtTick(params.tickLower),
+                    TickMath.getSqrtRatioAtTick(params.tickUpper),
+                    params.liquidityDelta
+                );
+            }
+        }
     }
 
     /// @dev Mutually exclusive reentrancy protection into the pool to/from a method. This method also prevents entrance
