@@ -251,8 +251,23 @@ contract CLAMM {
             IERC20(token1).transferFrom(msg.sender, address(this), amount1);
         }
     }
-    function collect() external {
+    function collect(address receipient, int24 tickLower, int24 tickUpper, uint128 amount0Requested, uint128 amount1Requested) 
+                external lock
+                    returns (uint128 amount0, uint128 amount1) {
+        
+        Position.Info storage position = positions.get(msg.sender, tickLower, tickUpper);
 
+        amount0 = amount0Requested > position.tokensOwed0 ? position.tokensOwed0 : amount0Requested;
+        amount1 = amount1Requested > position.tokensOwed1 ? position.tokensOwed1 : amount1Requested;
+
+        if (amount0 > 0) {
+            position.tokensOwed0 -= amount0;
+            IERC20(token0).transfer(receipient, amount0);
+        }
+        if (amount1 > 0) {
+            position.tokensOwed1 -= amount1;
+            IERC20(token1).transfer(receipient, amount1);
+        }
     } 
 
     function burn(int24 tickLower, int24 tickUpper, uint128 amount) external lock returns(uint256 amount0, uint256 amount1) {
