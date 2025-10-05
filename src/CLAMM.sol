@@ -9,9 +9,11 @@ import "./lib/Position.sol";
 import "./lib/SafeCast.sol";
 import "./lib/TickMath.sol";
 import "./lib/SqrtPriceMath.sol";
+import "./lib/SwapMath.sol";
 
 contract CLAMM {
     using SafeCast for int256;
+    using SafeCast for uint256;
     using Position for mapping(bytes32 => Position.Info);
     using Position for Position.Info;
     using Tick for mapping(int24 => Tick.Info);
@@ -376,6 +378,38 @@ contract CLAMM {
             feeGrowthGlobalX128: zeroForOne? feeGrowthGlobal0X128 : feeGrowthGlobal1X128,
             liquidity: cache.liquidityStart
         });
+
+        while (state.amountSpecifiedRemaining != 0 && state.sqrtPriceX96 != sqrtPriceLimitX96) {
+            StepComputations memory step;
+
+            step.sqrtPriceStartX96 = state.sqrtPriceX96;
+
+            step.tickNext = state.tick + 1;
+            step.sqrtPriceNextX96 = TickMath.getSqrtRatioAtTick(step.tickNext);
+
+            // compute values to swap to the target tick, price limit, or point where input/output amount is exhausted
+            (state.sqrtPriceX96, step.amountIn, step.amountOut, step.feeAmount) = SwapMath.computeSwapStep(
+                state.sqrtPriceX96,
+                (zeroForOne ? step.sqrtPriceNextX96 < sqrtPriceLimitX96 : step.sqrtPriceNextX96 > sqrtPriceLimitX96)
+                    ? sqrtPriceLimitX96
+                    : step.sqrtPriceNextX96,
+                state.liquidity,
+                state.amountSpecifiedRemaining,
+                fee
+            );
+
+            if (exactInput) {
+                state.amountSpecifiedRemaining -= (step.amountIn + step.feeAmount).toInt256();
+                state.amountCalculated -= step.amountOut.toInt256();
+            } else {
+                state.amountSpecifiedRemaining += step.amountOut.toInt256();
+                state.amountCalculated += (step.amountIn + step.feeAmount).toInt256();
+            }
+            
+            if (state.sqrtPriceX96 != step.sqrtPriceNextX96) {
+                
+            }
+        }
 
         // Update sqrtPriceX96 and tick
         if(slot0Start.tick != state.tick) {
